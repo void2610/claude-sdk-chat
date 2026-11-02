@@ -31,6 +31,17 @@
     background-position: calc(100% - 15px) 55%, calc(100% - 10px) 55%; background-size: 5px 5px; background-repeat: no-repeat; }
   #cwd { max-width: 360px; min-width: 0; }
   .spacer { flex: 1; }
+  #tabs { display: flex; gap: 4px; overflow-x: auto; min-width: 0; scrollbar-width: none; }
+  .tab { display: flex; align-items: center; gap: 6px; max-width: 220px; padding: 4px 6px 4px 10px; border: 1px solid transparent; border-radius: 8px; font-size: 13px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .tab:hover { background: var(--bg); }
+  .tab.active { background: var(--bg); border-color: var(--line); color: var(--fg); }
+  .tab.unread .tlabel { color: var(--fg); font-weight: 700; }
+  .tlabel { overflow: hidden; text-overflow: ellipsis; }
+  .tstate { flex: none; font-size: 11px; color: var(--run); }
+  .tstate.busy { width: 8px; height: 8px; border-radius: 50%; background: var(--run); animation: pulse 1s infinite alternate; }
+  .tclose { flex: none; border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; border-radius: 4px; line-height: 1; visibility: hidden; }
+  .tab:hover .tclose, .tab.active .tclose { visibility: visible; }
+  .tclose:hover { color: var(--fg); background: var(--line); }
   .cost { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   #openSettings { font-size: 16px; line-height: 1; padding: 4px 8px; }
   .icon-btn { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 4px 10px; font-size: 13px; cursor: pointer; white-space: nowrap; }
@@ -42,7 +53,7 @@
 
   /* 会話 */
   main { flex: 1; overflow-y: auto; }
-  #log { max-width: 820px; margin: 0 auto; padding: 24px 16px 8px; }
+  .log { max-width: 820px; margin: 0 auto; padding: 24px 16px 8px; }
   .empty { text-align: center; color: var(--muted); margin-top: 18vh; }
   .empty h2 { color: var(--fg); font-size: 22px; margin: 0 0 8px; }
   .user.long { max-height: 15em; overflow: hidden; cursor: pointer; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
@@ -113,13 +124,14 @@
 <body>
 <header>
   <span class="brand">SDK Chat</span>
+  <nav id="tabs"></nav>
+  <button class="icon-btn" id="reset" type="button" title="新しいタブ (Alt+T)">＋</button>
   <span class="spacer"></span>
   <button class="icon-btn" id="openHistory" type="button" title="過去の会話を再開">履歴</button>
-  <button class="icon-btn" id="reset" type="button" title="新しい会話">＋ 新規</button>
   <button class="icon-btn" id="openSettings" type="button" title="設定">⚙</button>
 </header>
 
-<main id="scroller"><div id="log"></div></main>
+<main id="scroller"></main>
 
 <footer>
   <form class="composer" id="form">
@@ -164,89 +176,163 @@ const $ = (id) => document.getElementById(id);
 const store = (k, v) => { try { v === undefined ? (v = localStorage.getItem(k)) : localStorage.setItem(k, v); } catch {} return v; };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const md = (text) => DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
-
-let sessionId = null, total = 0, hasKey = false;
-
-/* 自動スクロールは、読み返している間は止める */
-const scroller = $("scroller");
-let stick = true;
-scroller.addEventListener("scroll", () => { stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; });
-const follow = () => { if (stick) scroller.scrollTop = scroller.scrollHeight; };
-const append = (node) => { $("log").append(node); follow(); return node; };
-
 const shortPath = (p) => p.replace(/^\/Users\/[^/]+/, "~");
-const showEmpty = () => {
+const k = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : n);
+const PICK = "__pick__";
+const TASK_LABEL = { local_bash: "シェル", monitor: "Monitor", local_agent: "エージェント", remote_agent: "リモートエージェント", workflow: "ワークフロー" };
+
+let hasKey = false;
+const post = async (url, body) => {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `${res.status}`);
+  return res.json();
+};
+// 失敗を握りつぶして「読み込み中」のまま止まらないよう、HTTP の失敗も例外にする
+const getJson = async (url) => {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`.trim());
+  return res.json();
+};
+
+/* タブ: 1 タブ = 1 会話。裏のタブの会話もサーバー側で動き続ける */
+const tabs = [];
+let cur = null;
+const scroller = $("scroller");
+scroller.addEventListener("scroll", () => { if (cur) cur.stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; });
+const follow = (tab) => { if (tab === cur && tab.stick) scroller.scrollTop = scroller.scrollHeight; };
+const append = (tab, node) => { tab.logEl.append(node); follow(tab); return node; };
+
+const makeTab = () => {
+  const tab = {
+    id: crypto.randomUUID(), logEl: el("div", "log"), conv: null, events: null, renderer: null, busy: false,
+    sessionId: null, total: 0, title: null, bg: [], unread: false, stick: true, scrollTop: 0, draft: "",
+    cwd: loadRecent()[0] ?? "", model: store("model") ?? "default", effort: store("effort") ?? "",
+  };
+  tab.logEl.hidden = true;
+  scroller.append(tab.logEl);
+  tabs.push(tab);
+  showEmpty(tab);
+  return tab;
+};
+
+const renderTabs = () => {
+  $("tabs").replaceChildren(...tabs.map((tab) => {
+    const b = el("div", "tab" + (tab === cur ? " active" : "") + (tab.unread ? " unread" : ""));
+    b.title = [tab.title, tab.cwd && shortPath(tab.cwd)].filter(Boolean).join("\n");
+    const state = el("span", "tstate" + (tab.busy ? " busy" : tab.bg.length ? " bg" : ""));
+    state.textContent = tab.busy ? "" : tab.bg.length ? `⧗${tab.bg.length}` : "";
+    const close = el("button", "tclose", "×");
+    close.type = "button";
+    close.title = "タブを閉じる";
+    close.onclick = (e) => { e.stopPropagation(); closeTab(tab); };
+    b.append(state, el("span", "tlabel", tab.title ?? (tab.cwd ? tab.cwd.split("/").pop() : "新しい会話")), close);
+    b.onclick = () => switchTab(tab);
+    return b;
+  }));
+};
+
+const switchTab = (tab) => {
+  if (cur) { cur.scrollTop = scroller.scrollTop; cur.draft = ta.value; cur.logEl.hidden = true; }
+  cur = tab;
+  tab.unread = false;
+  tab.logEl.hidden = false;
+  scroller.scrollTop = tab.stick ? scroller.scrollHeight : tab.scrollTop;
+  ta.value = tab.draft; grow();
+  renderDirs(tab.cwd || undefined);
+  applyModel();
+  renderBackground(tab);
+  renderBusy(tab);
+  $("total").textContent = "$" + tab.total.toFixed(4);
+  renderTabs();
+  ta.focus();
+};
+
+const newTab = () => switchTab(makeTab());
+
+const closeTab = (tab) => {
+  closeConversation(tab);
+  tab.logEl.remove();
+  const i = tabs.indexOf(tab);
+  tabs.splice(i, 1);
+  if (!tabs.length) return newTab();
+  if (tab === cur) { cur = null; switchTab(tabs[Math.min(i, tabs.length - 1)]); } else renderTabs();
+};
+
+const showEmpty = (tab) => {
   const box = el("div", "empty");
   box.append(el("h2", null, "何をしましょうか"));
-  const dir = $("cwd").value;
-  box.append(el("div", null, dir && dir !== PICK ? shortPath(dir) : "まず作業ディレクトリを選んでください"));
+  box.append(el("div", null, tab.cwd ? shortPath(tab.cwd) : "まず作業ディレクトリを選んでください"));
   if (!hasKey) box.append(el("div", "warn", "API キーが未設定です (⚙ から設定)"));
-  $("log").replaceChildren(box);
+  tab.logEl.replaceChildren(box);
 };
 
 /* 作業ディレクトリ */
-const PICK = "__pick__";
 const loadRecent = () => { try { return JSON.parse(store("recentDirs") ?? "[]"); } catch { return []; } };
 const renderDirs = (selected) => {
   const recent = loadRecent();
+  if (selected && !recent.includes(selected)) recent.unshift(selected);
   $("cwd").replaceChildren(
     ...(recent.length ? [] : [Object.assign(new Option("作業ディレクトリ未選択", ""), { disabled: true })]),
     ...recent.map((p) => Object.assign(new Option("📁 " + p.split("/").pop(), p), { title: p })),
     new Option("フォルダを選択…", PICK),
   );
-  $("cwd").value = selected ?? recent[0] ?? "";
-  $("cwd").title = $("cwd").value && $("cwd").value !== PICK ? $("cwd").value : "作業ディレクトリ";
+  $("cwd").value = selected ?? "";
+  $("cwd").title = selected ?? "作業ディレクトリ";
 };
-const useDir = (path) => {
+const useDir = (tab, path) => {
   store("recentDirs", JSON.stringify([path, ...loadRecent().filter((p) => p !== path)].slice(0, 10)));
-  renderDirs(path);
+  if (tab.cwd === path) return;
+  tab.cwd = path;
   // 会話はフォルダごとに保存されるので、フォルダを変えたら新しい会話にする
-  newConversation();
+  newConversation(tab);
+  if (tab === cur) renderDirs(path);
+  renderTabs();
 };
-renderDirs();
-let lastDir = $("cwd").value;
 $("cwd").onchange = async () => {
-  if ($("cwd").value !== PICK) return useDir((lastDir = $("cwd").value));
+  const tab = cur;
+  if ($("cwd").value !== PICK) return useDir(tab, $("cwd").value);
   const { path } = await (await fetch("/api/pick-dir", { method: "POST" })).json();
-  if (path) useDir((lastDir = path));
-  else renderDirs(lastDir || undefined);
+  if (path) useDir(tab, path);
+  else if (tab === cur) renderDirs(tab.cwd || undefined);
 };
 
-/* モデルとエフォート */
+/* モデルとエフォート (タブごと。会話の途中でも次の送信から効く) */
 let models = [];
 const EFFORT_LABEL = { low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
-const renderEffort = () => {
-  const levels = models.find((m) => m.value === $("model").value)?.efforts ?? [];
+const applyModel = () => {
+  if (!models.length || !cur) return;
+  $("model").value = cur.model;
+  if (!$("model").value) $("model").value = cur.model = "default";
+  const levels = models.find((m) => m.value === cur.model)?.efforts ?? [];
   $("effort").hidden = !levels.length;
   $("effort").replaceChildren(new Option("エフォート: 既定", ""), ...levels.map((l) => new Option("エフォート: " + EFFORT_LABEL[l], l)));
-  const saved = store("effort") ?? "";
-  $("effort").value = levels.includes(saved) ? saved : "";
+  if (!levels.includes(cur.effort)) cur.effort = "";
+  $("effort").value = cur.effort;
 };
 fetch("/api/models").then((r) => r.json()).then((list) => {
   models = list;
   $("model").replaceChildren(...list.map((m) => Object.assign(new Option(m.displayName, m.value), { title: m.description })));
-  $("model").value = store("model") ?? "default";
-  if (!$("model").value) $("model").value = "default";
-  renderEffort();
+  applyModel();
 });
-$("model").onchange = () => { store("model", $("model").value); renderEffort(); };
-$("effort").onchange = () => store("effort", $("effort").value);
+$("model").onchange = () => { cur.model = $("model").value; store("model", cur.model); applyModel(); };
+$("effort").onchange = () => { cur.effort = $("effort").value; store("effort", cur.effort); };
 
 /* API キー */
 const showKey = ({ masked }) => { hasKey = !!masked; $("keyState").textContent = masked ? `保存済み: ${masked}` : "未設定"; $("openSettings").classList.toggle("warn", !masked); };
-fetch("/api/key").then((r) => r.json()).then((k) => { showKey(k); if (!sessionId) showEmpty(); });
+const refreshEmpty = () => tabs.forEach((t) => { if (!t.sessionId && !t.conv) showEmpty(t); });
+fetch("/api/key").then((r) => r.json()).then((key) => { showKey(key); refreshEmpty(); });
 $("openSettings").onclick = () => $("settings").showModal();
 $("settings").onclose = async () => {
   if ($("settings").returnValue !== "save" || !$("key").value.trim()) return ($("key").value = "");
   const res = await fetch("/api/key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: $("key").value }) });
   $("key").value = "";
   showKey(await res.json());
-  if (!sessionId) showEmpty();
+  refreshEmpty();
 };
 
 /* ツールの 1 行要約 */
-const summarize = (name, input) => {
-  const rel = (p) => { const d = $("cwd").value; return p?.startsWith(d + "/") ? p.slice(d.length + 1) : shortPath(p ?? ""); };
+const summarize = (name, input, cwd) => {
+  const rel = (p) => (p?.startsWith(cwd + "/") ? p.slice(cwd.length + 1) : shortPath(p ?? ""));
   switch (name) {
     case "Bash": return input.command;
     case "Read": case "Write": case "Edit": case "NotebookEdit": return rel(input.file_path ?? input.notebook_path);
@@ -261,35 +347,35 @@ const summarize = (name, input) => {
 };
 
 // 貼り付けた長文で画面が埋まらないよう、長い発言は畳んでクリックで開く
-const addUser = (text) => {
-  const node = el("div", "user long", text);
-  append(node);
-  if (node.scrollHeight <= node.clientHeight) node.classList.remove("long");
-  else {
+const addUser = (tab, text) => {
+  const node = append(tab, el("div", "user long", text));
+  // 裏のタブは描画されず高さが測れないので、表に出たときに測る
+  const measure = () => {
+    if (node.scrollHeight <= node.clientHeight) return node.classList.remove("long");
     node.title = "クリックで全文を表示";
     node.onclick = () => { node.classList.remove("long"); node.title = ""; node.onclick = null; };
-  }
+  };
+  if (tab === cur) measure(); else tab.pendingMeasure = [...(tab.pendingMeasure ?? []), measure];
 };
 
 /* ストリームと履歴の再生で共通の描画 */
-const TASK_LABEL = { local_bash: "シェル", monitor: "Monitor", local_agent: "エージェント", remote_agent: "リモートエージェント", workflow: "ワークフロー" };
-const k = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : n);
-const makeRenderer = (live) => {
+const makeRenderer = (tab, live) => {
   const tools = new Map(), tasks = new Map();
   let textNode = null, textBuf = "", pending = false, thinking = null, lastCost = 0;
+  const add = (node) => append(tab, node);
   const settle = () => { thinking?.remove(); thinking = null; };
-  const renderText = () => { pending = false; if (textNode) { textNode.innerHTML = md(textBuf); follow(); } };
+  const renderText = () => { pending = false; if (textNode) { textNode.innerHTML = md(textBuf); follow(tab); } };
   const handle = (ev) => {
     switch (ev.kind) {
-      case "session": sessionId = ev.sessionId; break;
+      case "session": tab.sessionId = ev.sessionId; break;
       case "busy":
-        setBusy(ev.busy);
-        if (ev.busy && !thinking) thinking = append(el("div", "thinking", "考えています"));
+        setBusy(tab, ev.busy);
+        if (ev.busy && !thinking) thinking = add(el("div", "thinking", "考えています"));
         if (!ev.busy) settle();
         break;
-      case "user": textNode = null; addUser(ev.text); break;
-      case "text": settle(); textNode = null; append(el("div", "md")).innerHTML = md(ev.text); break;
-      case "text_start": settle(); textBuf = ""; textNode = append(el("div", "md")); break;
+      case "user": textNode = null; addUser(tab, ev.text); break;
+      case "text": settle(); textNode = null; add(el("div", "md")).innerHTML = md(ev.text); break;
+      case "text_start": settle(); textBuf = ""; textNode = add(el("div", "md")); break;
       case "text_delta":
         textBuf += ev.text;
         if (!pending) { pending = true; requestAnimationFrame(renderText); }
@@ -298,9 +384,9 @@ const makeRenderer = (live) => {
         settle(); textNode = null;
         const d = el("details", "tool");
         const s = el("summary");
-        s.append(el("span", "dot"), el("span", "tname", ev.name), el("span", "tsum", summarize(ev.name, ev.input)));
+        s.append(el("span", "dot"), el("span", "tname", ev.name), el("span", "tsum", summarize(ev.name, ev.input, tab.cwd)));
         d.append(s, el("pre", "in", JSON.stringify(ev.input, null, 2)));
-        tools.set(ev.id, append(d));
+        tools.set(ev.id, add(d));
         break;
       }
       case "tool_result": {
@@ -316,10 +402,10 @@ const makeRenderer = (live) => {
         const s = el("summary");
         const stop = el("button", "task-stop", "停止");
         stop.type = "button";
-        stop.onclick = (e) => { e.preventDefault(); post("/api/stop-task", { conv, taskId: ev.id }); };
+        stop.onclick = (e) => { e.preventDefault(); post("/api/stop-task", { conv: tab.conv, taskId: ev.id }); };
         s.append(el("span", "dot"), el("span", "tname", "⧗ " + (TASK_LABEL[ev.taskType] ?? ev.subagentType ?? ev.taskType ?? "タスク")), el("span", "tsum", ev.description), stop);
         d.append(s, el("pre", "out", "実行中…"));
-        tasks.set(ev.id, append(d));
+        tasks.set(ev.id, add(d));
         break;
       }
       case "task_update": {
@@ -334,19 +420,20 @@ const makeRenderer = (live) => {
         }
         break;
       }
-      case "background": renderBackground(ev.tasks); break;
-      case "error": settle(); append(el("div", "error", ev.text)); break;
+      case "background": tab.bg = ev.tasks; renderBackground(tab); renderTabs(); break;
+      case "error": settle(); add(el("div", "error", ev.text)); break;
       case "result": {
         settle();
-        sessionId = ev.sessionId;
+        tab.sessionId = ev.sessionId;
         // 開いたままの会話では、費用は会話の始めからの累計で届く
         const cost = Math.max(0, (ev.cost ?? 0) - lastCost);
         lastCost = ev.cost ?? 0;
-        total += cost;
-        $("total").textContent = "$" + total.toFixed(4);
+        tab.total += cost;
+        if (tab === cur) $("total").textContent = "$" + tab.total.toFixed(4);
         const parts = [`$${cost.toFixed(4)}`, `${(ev.durationMs / 1000).toFixed(1)} 秒`, `入力 ${k(ev.inputTokens)} / 出力 ${k(ev.outputTokens)} トークン`];
-        if (ev.isError) append(el("div", "error", (ev.errors ?? []).join("\n") || "エラーで終了しました"));
-        append(el("div", "meta", parts.join(" · ")));
+        if (ev.isError) add(el("div", "error", (ev.errors ?? []).join("\n") || "エラーで終了しました"));
+        add(el("div", "meta", parts.join(" · ")));
+        if (tab !== cur) { tab.unread = true; renderTabs(); }
         break;
       }
       case "closed": finish(); break;
@@ -364,11 +451,52 @@ const makeRenderer = (live) => {
   return { handle, finish };
 };
 
-// 失敗を握りつぶして「読み込み中」のまま止まらないよう、HTTP の失敗も例外にする
-const getJson = async (url) => {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`.trim());
-  return res.json();
+/* 会話 (サーバー側で開いたままの query) */
+const renderBackground = (tab) => {
+  if (tab !== cur) return;
+  $("bgTasks").hidden = !tab.bg.length;
+  $("bgTasks").textContent = `⧗ ${tab.bg.length} 件実行中`;
+  $("bgTasks").title = tab.bg.map((t) => `${TASK_LABEL[t.type] ?? t.type}: ${t.description}`).join("\n");
+};
+const renderBusy = (tab) => {
+  if (tab !== cur) return;
+  $("send").classList.toggle("stop", tab.busy);
+  $("send").textContent = tab.busy ? "■" : "↑";
+  $("send").title = tab.busy ? "停止" : "送信";
+};
+const setBusy = (tab, busy) => {
+  if (tab.busy === busy) return;
+  tab.busy = busy;
+  renderBusy(tab);
+  renderTabs();
+};
+const detach = (tab) => {
+  tab.events?.close();
+  tab.renderer?.finish();
+  tab.conv = tab.events = tab.renderer = null;
+  tab.bg = [];
+  renderBackground(tab);
+  setBusy(tab, false);
+  renderTabs();
+};
+const closeConversation = (tab) => {
+  if (tab.conv) post("/api/close", { conv: tab.conv }).catch(() => {});
+  detach(tab);
+};
+const newConversation = (tab) => {
+  closeConversation(tab);
+  tab.sessionId = null; tab.total = 0; tab.title = null;
+  if (tab === cur) $("total").textContent = "$0.0000";
+  showEmpty(tab);
+};
+const listen = (tab) => {
+  tab.events = new EventSource(`/api/events?conv=${tab.conv}`);
+  tab.events.onmessage = (m) => {
+    const ev = JSON.parse(m.data);
+    tab.renderer?.handle(ev);
+    // 会話が閉じたら、次の送信で保存された続きから開き直す
+    if (ev.kind === "closed") detach(tab);
+  };
 };
 
 /* 過去の会話 */
@@ -380,15 +508,15 @@ let sessions = [];
 const renderSessions = () => {
   const q = $("historySearch").value.trim().toLowerCase();
   const onlyHere = $("historyHere").checked;
-  const here = $("cwd").value;
-  const list = sessions.filter((s) => (!onlyHere || s.cwd === here) && (!q || `${s.title} ${s.cwd}`.toLowerCase().includes(q)));
+  const list = sessions.filter((s) => (!onlyHere || s.cwd === cur.cwd) && (!q || `${s.title} ${s.cwd}`.toLowerCase().includes(q)));
   $("historyList").replaceChildren(
     ...(list.length ? list.map((s) => {
       const b = el("button", "session");
       b.type = "button";
       b.title = s.cwd ?? "";
-      b.append(el("span", "stitle", s.title), el("span", "smeta", [`📁 ${s.cwd?.split("/").pop() ?? "?"}`, ago(s.lastModified), s.gitBranch].filter(Boolean).join(" · ")));
-      b.onclick = () => { $("history").close(); resume(s.sessionId, s.cwd); };
+      const open = tabs.find((t) => t.sessionId === s.sessionId);
+      b.append(el("span", "stitle", (open ? "● " : "") + s.title), el("span", "smeta", [`📁 ${s.cwd?.split("/").pop() ?? "?"}`, ago(s.lastModified), s.gitBranch, open && "タブで開いています"].filter(Boolean).join(" · ")));
+      b.onclick = () => { $("history").close(); open ? switchTab(open) : resume(s); };
       return b;
     }) : [el("div", "meta", "該当する会話はありません")]),
   );
@@ -407,63 +535,30 @@ $("openHistory").onclick = async () => {
   }
   renderSessions();
 };
-const resume = async (id, dir) => {
-  // 会話はそのフォルダで続けるので、作業ディレクトリも切り替える
-  if (dir && dir !== $("cwd").value) { lastDir = dir; useDir(dir); } else newConversation();
-  dir = $("cwd").value;
-  sessionId = id;
-  $("log").replaceChildren(el("div", "meta", "読み込み中…"));
+const resume = async (s) => {
+  // 空のタブならそこで、会話中のタブなら新しいタブで開く
+  const tab = !cur.sessionId && !cur.conv ? cur : makeTab();
+  if (s.cwd) useDir(tab, s.cwd);
+  tab.sessionId = s.sessionId;
+  tab.title = s.title;
+  switchTab(tab);
+  tab.logEl.replaceChildren(el("div", "meta", "読み込み中…"));
   let events;
   try {
-    events = await getJson(`/api/sessions?dir=${encodeURIComponent(dir)}&id=${id}`);
+    events = await getJson(`/api/sessions?dir=${encodeURIComponent(tab.cwd)}&id=${s.sessionId}`);
   } catch (err) {
-    sessionId = null;
-    return $("log").replaceChildren(el("div", "error", `読み込めませんでした: ${err.message}`));
+    tab.sessionId = null;
+    return tab.logEl.replaceChildren(el("div", "error", `読み込めませんでした: ${err.message}`));
   }
-  $("log").replaceChildren();
-  const r = makeRenderer(false);
+  tab.logEl.replaceChildren();
+  const r = makeRenderer(tab, false);
   events.forEach(r.handle);
   r.finish();
-  append(el("div", "meta", "ここから続きを話せます"));
-  stick = true; follow(); ta.focus();
+  append(tab, el("div", "meta", "ここから続きを話せます"));
+  tab.stick = true; follow(tab); renderTabs(); ta.focus();
 };
 
-/* 会話 (サーバー側で開いたままの query) */
-let conv = null, events = null, renderer = null, busy = false;
-const post = async (url, body) => {
-  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `${res.status}`);
-  return res.json();
-};
-const renderBackground = (tasks) => {
-  $("bgTasks").hidden = !tasks.length;
-  $("bgTasks").textContent = `⧗ ${tasks.length} 件実行中`;
-  $("bgTasks").title = tasks.map((t) => `${TASK_LABEL[t.type] ?? t.type}: ${t.description}`).join("\n");
-};
-const closeConversation = () => {
-  if (conv) post("/api/close", { conv }).catch(() => {});
-  events?.close();
-  renderer?.finish();
-  conv = events = renderer = null;
-  renderBackground([]);
-  setBusy(false);
-};
-const newConversation = () => {
-  closeConversation();
-  sessionId = null; total = 0; $("total").textContent = "$0.0000";
-  showEmpty();
-};
-const listen = () => {
-  events = new EventSource(`/api/events?conv=${conv}`);
-  events.onmessage = (m) => {
-    const ev = JSON.parse(m.data);
-    renderer.handle(ev);
-    // 会話が閉じたら、次の送信で保存された続きから開き直す
-    if (ev.kind === "closed") { events.close(); conv = events = renderer = null; renderBackground([]); setBusy(false); }
-  };
-};
-
-/* 送信 */
+/* 入力 */
 const ta = $("prompt");
 const grow = () => { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px"; };
 ta.addEventListener("input", grow);
@@ -471,6 +566,7 @@ ta.addEventListener("input", grow);
 ta.onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); $("form").requestSubmit(); }
 };
+
 /* 過去のプロンプト (↑↓) */
 const loadPrompts = () => { try { return JSON.parse(store("prompts") ?? "[]"); } catch { return []; } };
 let promptIndex = -1, draft = "";
@@ -499,46 +595,50 @@ ta.addEventListener("keydown", (e) => {
 });
 ta.addEventListener("input", () => { promptIndex = -1; });
 
-const interrupt = () => { if (conv && busy) post("/api/interrupt", { conv }).catch(() => {}); };
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") interrupt(); });
+const interrupt = (tab) => { if (tab.conv && tab.busy) post("/api/interrupt", { conv: tab.conv }).catch(() => {}); };
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !document.querySelector("dialog[open]")) interrupt(cur);
+  // ブラウザが ⌘T / ⌘W を取るので、タブの操作は Alt で行う
+  if (e.altKey && (e.code === "KeyT" || e.code === "KeyN")) { e.preventDefault(); newTab(); }
+  if (e.altKey && e.code === "KeyW") { e.preventDefault(); closeTab(cur); }
+  if (e.altKey && /^Digit[1-9]$/.test(e.code)) { const t = tabs[Number(e.code.slice(5)) - 1]; if (t) { e.preventDefault(); switchTab(t); } }
+});
 
-const setBusy = (b) => {
-  busy = b;
-  $("send").classList.toggle("stop", b);
-  $("send").textContent = b ? "■" : "↑";
-  $("send").title = b ? "停止" : "送信";
-};
-
-$("reset").onclick = () => { newConversation(); ta.focus(); };
-window.addEventListener("beforeunload", () => { if (conv) navigator.sendBeacon?.("/api/close", new Blob([JSON.stringify({ conv })], { type: "application/json" })); });
+$("reset").onclick = newTab;
+window.addEventListener("beforeunload", () => {
+  for (const t of tabs) if (t.conv) navigator.sendBeacon?.("/api/close", new Blob([JSON.stringify({ conv: t.conv })], { type: "application/json" }));
+});
+// 裏で描いた長文の高さは、タブが表に出てから測る
+new MutationObserver(() => { if (cur?.pendingMeasure) { cur.pendingMeasure.forEach((f) => f()); cur.pendingMeasure = null; } }).observe(scroller, { subtree: true, attributes: true, attributeFilter: ["hidden"] });
 
 $("form").onsubmit = async (e) => {
   e.preventDefault();
-  if (busy) return interrupt();
+  const tab = cur;
+  if (tab.busy) return interrupt(tab);
   const prompt = ta.value.trim();
   if (!prompt) return;
-  const cwd = $("cwd").value;
-  if (!cwd || cwd === PICK) return $("cwd").focus();
+  if (!tab.cwd) return $("cwd").focus();
   if (!hasKey) return $("settings").showModal();
 
-  if (!sessionId && !conv) $("log").replaceChildren();
-  stick = true;
-  addUser(prompt);
+  if (!tab.sessionId && !tab.conv) tab.logEl.replaceChildren();
+  tab.stick = true;
+  tab.title ??= prompt.split("\n")[0].slice(0, 40);
+  addUser(tab, prompt);
   rememberPrompt(prompt);
-  ta.value = ""; grow();
-  const fresh = !conv;
-  if (fresh) { conv = crypto.randomUUID(); renderer = makeRenderer(true); }
+  ta.value = ""; tab.draft = ""; grow();
+  renderTabs();
+  const fresh = !tab.conv;
+  if (fresh) { tab.conv = crypto.randomUUID(); tab.renderer = makeRenderer(tab, true); }
   try {
-    await post("/api/send", { conv, prompt, cwd, sessionId, model: $("model").value, effort: $("effort").value });
-    if (fresh) listen();
+    await post("/api/send", { conv: tab.conv, prompt, cwd: tab.cwd, sessionId: tab.sessionId, model: tab.model, effort: tab.effort });
+    if (fresh) listen(tab);
   } catch (err) {
-    append(el("div", "error", `送れませんでした: ${err.message}`));
-    if (fresh) conv = renderer = null;
+    append(tab, el("div", "error", `送れませんでした: ${err.message}`));
+    if (fresh) tab.conv = tab.renderer = null;
   }
 };
 
-showEmpty();
-ta.focus();
+newTab();
 </script>
 </body>
 </html>
