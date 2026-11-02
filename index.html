@@ -34,7 +34,7 @@
 </header>
 <div id="log"></div>
 <form id="form">
-  <textarea id="prompt" placeholder="⌘+Enter で送信"></textarea>
+  <textarea id="prompt" placeholder="Enter で送信 / Shift+Enter で改行"></textarea>
   <button id="send">送信</button>
 </form>
 <script>
@@ -89,12 +89,18 @@ $("saveKey").onclick = async () => {
 };
 
 $("reset").onclick =() => { sessionId = null; $("log").innerHTML = ""; };
-$("prompt").onkeydown = (e) => { if (e.key === "Enter" && e.metaKey) $("form").requestSubmit(); };
+// 日本語の変換確定の Enter では送らない
+$("prompt").onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+    e.preventDefault();
+    $("form").requestSubmit();
+  }
+};
 
 $("form").onsubmit = async (e) => {
   e.preventDefault();
   const prompt = $("prompt").value.trim();
-  if (!prompt) return;
+  if (!prompt || $("send").disabled) return;
   if (!$("cwd").value || $("cwd").value === PICK) return add("meta", "作業ディレクトリを選んでください");
   add("user", prompt);
   $("prompt").value = "";
