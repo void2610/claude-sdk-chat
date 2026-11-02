@@ -77,7 +77,17 @@ const handleChat = async (req, res) => {
   res.end();
 };
 
+const ALLOWED_HOSTS = [`127.0.0.1:${PORT}`, `localhost:${PORT}`];
+
+// 確認なしで任意のコマンドが走るので、ほかのサイトからの POST と DNS rebinding を断る
+const isSameOrigin = (req) => {
+  if (!ALLOWED_HOSTS.includes(req.headers.host)) return false;
+  const origin = req.headers.origin;
+  return !origin || ALLOWED_HOSTS.some((h) => origin === `http://${h}`);
+};
+
 createServer(async (req, res) => {
+  if (!isSameOrigin(req)) return res.writeHead(403).end();
   if (req.method === "POST" && req.url === "/api/chat") return handleChat(req, res);
   if (req.url === "/api/key") {
     if (req.method === "POST") await saveApiKey((await readBody(req)).apiKey?.trim() ?? "");
