@@ -26,6 +26,9 @@
 <header>
   <input id="cwd" placeholder="作業ディレクトリ (絶対パス)">
   <input id="model" placeholder="model (空なら既定)" size="16">
+  <input id="key" type="password" placeholder="API キー" size="16" autocomplete="off">
+  <button id="saveKey" type="button">キーを保存</button>
+  <span class="meta" id="keyState"></span>
   <button id="reset" type="button">新しい会話</button>
   <span class="meta" id="total">$0.0000</span>
 </header>
@@ -49,7 +52,15 @@ const add = (cls, text) => {
   $("log").scrollTop = $("log").scrollHeight;
 };
 
-$("reset").onclick = () => { sessionId = null; $("log").innerHTML = ""; };
+const showKey = ({ masked }) => { $("keyState").textContent = masked ? `キー: ${masked}` : "キー未設定"; };
+fetch("/api/key").then((r) => r.json()).then(showKey);
+$("saveKey").onclick = async () => {
+  const res = await fetch("/api/key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: $("key").value }) });
+  $("key").value = "";
+  showKey(await res.json());
+};
+
+$("reset").onclick =() => { sessionId = null; $("log").innerHTML = ""; };
 $("prompt").onkeydown = (e) => { if (e.key === "Enter" && e.metaKey) $("form").requestSubmit(); };
 
 $("form").onsubmit = async (e) => {
