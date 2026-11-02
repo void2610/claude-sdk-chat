@@ -91,6 +91,10 @@
   .primary { border: 0; border-radius: 8px; padding: 6px 14px; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
 
   dialog.wide { width: min(640px, calc(100vw - 32px)); }
+  .hbar { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+  .hbar input[type=search] { flex: 1; width: auto; }
+  .check { display: flex; gap: 4px; align-items: center; white-space: nowrap; font-size: 13px; color: var(--muted); margin: 0; }
+  .check input { width: auto; }
   #historyList { max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
   .session { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; border: 1px solid transparent; background: none; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
   .session:hover { background: var(--bg); border-color: var(--line); }
@@ -124,7 +128,11 @@
 </footer>
 
 <dialog id="history" class="wide">
-  <h3>過去の会話 <span class="meta" id="historyDir"></span></h3>
+  <h3>過去の会話</h3>
+  <div class="hbar">
+    <input id="historySearch" type="search" placeholder="題名やフォルダで絞り込み">
+    <label class="check"><input id="historyHere" type="checkbox"> このフォルダのみ</label>
+  </div>
   <div id="historyList"></div>
   <form method="dialog" class="row"><button class="icon-btn">閉じる</button></form>
 </dialog>
@@ -322,30 +330,41 @@ const ago = (t) => {
   const m = Math.round((Date.now() - t) / 60000);
   return m < 60 ? `${m} 分前` : m < 1440 ? `${Math.round(m / 60)} 時間前` : `${Math.round(m / 1440)} 日前`;
 };
-$("openHistory").onclick = async () => {
-  const dir = $("cwd").value;
-  if (!dir || dir === PICK) return $("cwd").focus();
-  $("historyDir").textContent = shortPath(dir);
-  $("historyList").replaceChildren(el("div", "meta", "読み込み中…"));
-  $("history").showModal();
-  let list;
-  try {
-    list = await getJson(`/api/sessions?dir=${encodeURIComponent(dir)}`);
-  } catch (err) {
-    return $("historyList").replaceChildren(el("div", "error", `読み込めませんでした: ${err.message}`));
-  }
+let sessions = [];
+const renderSessions = () => {
+  const q = $("historySearch").value.trim().toLowerCase();
+  const onlyHere = $("historyHere").checked;
+  const here = $("cwd").value;
+  const list = sessions.filter((s) => (!onlyHere || s.cwd === here) && (!q || `${s.title} ${s.cwd}`.toLowerCase().includes(q)));
   $("historyList").replaceChildren(
     ...(list.length ? list.map((s) => {
       const b = el("button", "session");
       b.type = "button";
-      b.append(el("span", "stitle", s.title), el("span", "smeta", [ago(s.lastModified), s.gitBranch].filter(Boolean).join(" · ")));
-      b.onclick = () => { $("history").close(); resume(s.sessionId); };
+      b.title = s.cwd ?? "";
+      b.append(el("span", "stitle", s.title), el("span", "smeta", [`📁 ${s.cwd?.split("/").pop() ?? "?"}`, ago(s.lastModified), s.gitBranch].filter(Boolean).join(" · ")));
+      b.onclick = () => { $("history").close(); resume(s.sessionId, s.cwd); };
       return b;
-    }) : [el("div", "meta", "このフォルダの会話はまだありません")]),
+    }) : [el("div", "meta", "該当する会話はありません")]),
   );
 };
-const resume = async (id) => {
-  const dir = $("cwd").value;
+$("historySearch").oninput = renderSessions;
+$("historyHere").onchange = renderSessions;
+$("openHistory").onclick = async () => {
+  $("historySearch").value = "";
+  $("historyList").replaceChildren(el("div", "meta", "読み込み中…"));
+  $("history").showModal();
+  $("historySearch").focus();
+  try {
+    sessions = await getJson("/api/sessions");
+  } catch (err) {
+    return $("historyList").replaceChildren(el("div", "error", `読み込めませんでした: ${err.message}`));
+  }
+  renderSessions();
+};
+const resume = async (id, dir) => {
+  // 会話はそのフォルダで続けるので、作業ディレクトリも切り替える
+  if (dir && dir !== $("cwd").value) useDir((lastDir = dir));
+  dir = $("cwd").value;
   sessionId = id; total = 0; $("total").textContent = "$0.0000";
   $("log").replaceChildren(el("div", "meta", "読み込み中…"));
   let events;

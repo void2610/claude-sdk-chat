@@ -165,8 +165,8 @@ const route = async (req, res) => {
     const id = url.searchParams.get("id");
     const body = id
       ? await replaySession(id, dir)
-      : (await listSessions({ dir, limit: 50 })).map(({ sessionId, summary, customTitle, firstPrompt, lastModified, gitBranch }) => ({
-          sessionId, title: customTitle || summary || firstPrompt || "(無題)", lastModified, gitBranch,
+      : (await listSessions({ dir: dir || undefined, limit: 200 })).map(({ sessionId, summary, customTitle, firstPrompt, lastModified, gitBranch, cwd }) => ({
+          sessionId, title: customTitle || summary || firstPrompt || "(無題)", lastModified, gitBranch, cwd,
         }));
     res.writeHead(200, { "Content-Type": "application/json" });
     return res.end(JSON.stringify(body));
