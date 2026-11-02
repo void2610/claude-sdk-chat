@@ -36,6 +36,9 @@
   .icon-btn { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 4px 10px; font-size: 13px; cursor: pointer; white-space: nowrap; }
   .icon-btn:hover, .pill:hover { border-color: var(--muted); }
   .warn { color: var(--err); }
+  .bg { color: var(--run); }
+  .task-stop { margin-left: auto; flex: none; border: 1px solid var(--line); background: var(--bg); border-radius: 6px; font-size: 12px; padding: 0 8px; cursor: pointer; }
+  .task-stop:hover { border-color: var(--err); color: var(--err); }
 
   /* 会話 */
   main { flex: 1; overflow-y: auto; }
@@ -111,6 +114,7 @@
   <select id="model" class="pill" title="モデル"></select>
   <select id="effort" class="pill" title="エフォート"></select>
   <span class="spacer"></span>
+  <span class="cost bg" id="bgTasks" hidden></span>
   <span class="cost" id="total" title="この会話の合計">$0.0000</span>
   <button class="icon-btn" id="openHistory" type="button" title="過去の会話を再開">履歴</button>
   <button class="icon-btn" id="reset" type="button" title="新しい会話">＋ 新規</button>
@@ -155,7 +159,7 @@ const store = (k, v) => { try { v === undefined ? (v = localStorage.getItem(k)) 
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const md = (text) => DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
 
-let sessionId = null, total = 0, controller = null, hasKey = false;
+let sessionId = null, total = 0, hasKey = false;
 
 /* 自動スクロールは、読み返している間は止める */
 const scroller = $("scroller");
@@ -191,8 +195,7 @@ const useDir = (path) => {
   store("recentDirs", JSON.stringify([path, ...loadRecent().filter((p) => p !== path)].slice(0, 10)));
   renderDirs(path);
   // 会話はフォルダごとに保存されるので、フォルダを変えたら新しい会話にする
-  sessionId = null; total = 0; $("total").textContent = "$0.0000";
-  showEmpty();
+  newConversation();
 };
 renderDirs();
 let lastDir = $("cwd").value;
@@ -263,15 +266,21 @@ const addUser = (text) => {
 };
 
 /* ストリームと履歴の再生で共通の描画 */
+const TASK_LABEL = { local_bash: "シェル", monitor: "Monitor", local_agent: "エージェント", remote_agent: "リモートエージェント", workflow: "ワークフロー" };
+const k = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : n);
 const makeRenderer = (live) => {
-  const tools = new Map();
-  let textNode = null, textBuf = "", pending = false;
-  const waiting = live ? append(el("div", "thinking", "考えています")) : null;
-  const settle = () => waiting?.remove();
+  const tools = new Map(), tasks = new Map();
+  let textNode = null, textBuf = "", pending = false, thinking = null, lastCost = 0;
+  const settle = () => { thinking?.remove(); thinking = null; };
   const renderText = () => { pending = false; if (textNode) { textNode.innerHTML = md(textBuf); follow(); } };
   const handle = (ev) => {
     switch (ev.kind) {
       case "session": sessionId = ev.sessionId; break;
+      case "busy":
+        setBusy(ev.busy);
+        if (ev.busy && !thinking) thinking = append(el("div", "thinking", "考えています"));
+        if (!ev.busy) settle();
+        break;
       case "user": textNode = null; addUser(ev.text); break;
       case "text": settle(); textNode = null; append(el("div", "md")).innerHTML = md(ev.text); break;
       case "text_start": settle(); textBuf = ""; textNode = append(el("div", "md")); break;
@@ -295,25 +304,56 @@ const makeRenderer = (live) => {
         d.append(el("pre", "out", ev.text || "(出力なし)"));
         break;
       }
+      case "task": {
+        textNode = null;
+        const d = el("details", "tool task");
+        const s = el("summary");
+        const stop = el("button", "task-stop", "停止");
+        stop.type = "button";
+        stop.onclick = (e) => { e.preventDefault(); post("/api/stop-task", { conv, taskId: ev.id }); };
+        s.append(el("span", "dot"), el("span", "tname", "⧗ " + (TASK_LABEL[ev.taskType] ?? ev.subagentType ?? ev.taskType ?? "タスク")), el("span", "tsum", ev.description), stop);
+        d.append(s, el("pre", "out", "実行中…"));
+        tasks.set(ev.id, append(d));
+        break;
+      }
+      case "task_update": {
+        const d = tasks.get(ev.id);
+        if (!d) break;
+        if (ev.description) d.querySelector(".tsum").textContent = ev.description;
+        const lines = [ev.summary, ev.lastTool && `直近のツール: ${ev.lastTool}`, ev.usage && `${(ev.usage.duration_ms / 1000).toFixed(0)} 秒 · ツール ${ev.usage.tool_uses} 回 · ${k(ev.usage.total_tokens)} トークン`, ev.error].filter(Boolean);
+        if (lines.length) d.querySelector("pre.out").textContent = lines.join("\n");
+        if (["completed", "failed", "killed", "stopped"].includes(ev.status)) {
+          d.classList.add(ev.status === "completed" ? "ok" : "err");
+          d.querySelector(".task-stop")?.remove();
+        }
+        break;
+      }
+      case "background": renderBackground(ev.tasks); break;
       case "error": settle(); append(el("div", "error", ev.text)); break;
       case "result": {
         settle();
         sessionId = ev.sessionId;
-        total += ev.cost ?? 0;
+        // 開いたままの会話では、費用は会話の始めからの累計で届く
+        const cost = Math.max(0, (ev.cost ?? 0) - lastCost);
+        lastCost = ev.cost ?? 0;
+        total += cost;
         $("total").textContent = "$" + total.toFixed(4);
-        const k = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : n);
-        const parts = [`$${(ev.cost ?? 0).toFixed(4)}`, `${(ev.durationMs / 1000).toFixed(1)} 秒`, `入力 ${k(ev.inputTokens)} / 出力 ${k(ev.outputTokens)} トークン`];
+        const parts = [`$${cost.toFixed(4)}`, `${(ev.durationMs / 1000).toFixed(1)} 秒`, `入力 ${k(ev.inputTokens)} / 出力 ${k(ev.outputTokens)} トークン`];
         if (ev.isError) append(el("div", "error", (ev.errors ?? []).join("\n") || "エラーで終了しました"));
         append(el("div", "meta", parts.join(" · ")));
         break;
       }
+      case "closed": finish(); break;
     }
   };
   const finish = () => {
     settle();
     renderText();
     // 結果が届かなかったツールは、中断されたものとして止める
-    for (const d of tools.values()) if (!d.classList.contains("ok") && !d.classList.contains("err")) d.classList.add(live ? "err" : "ok");
+    for (const d of [...tools.values(), ...tasks.values()]) {
+      if (!d.classList.contains("ok") && !d.classList.contains("err")) d.classList.add(live ? "err" : "ok");
+      d.querySelector(".task-stop")?.remove();
+    }
   };
   return { handle, finish };
 };
@@ -363,9 +403,9 @@ $("openHistory").onclick = async () => {
 };
 const resume = async (id, dir) => {
   // 会話はそのフォルダで続けるので、作業ディレクトリも切り替える
-  if (dir && dir !== $("cwd").value) useDir((lastDir = dir));
+  if (dir && dir !== $("cwd").value) { lastDir = dir; useDir(dir); } else newConversation();
   dir = $("cwd").value;
-  sessionId = id; total = 0; $("total").textContent = "$0.0000";
+  sessionId = id;
   $("log").replaceChildren(el("div", "meta", "読み込み中…"));
   let events;
   try {
@@ -382,6 +422,41 @@ const resume = async (id, dir) => {
   stick = true; follow(); ta.focus();
 };
 
+/* 会話 (サーバー側で開いたままの query) */
+let conv = null, events = null, renderer = null, busy = false;
+const post = async (url, body) => {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `${res.status}`);
+  return res.json();
+};
+const renderBackground = (tasks) => {
+  $("bgTasks").hidden = !tasks.length;
+  $("bgTasks").textContent = `⧗ ${tasks.length} 件実行中`;
+  $("bgTasks").title = tasks.map((t) => `${TASK_LABEL[t.type] ?? t.type}: ${t.description}`).join("\n");
+};
+const closeConversation = () => {
+  if (conv) post("/api/close", { conv }).catch(() => {});
+  events?.close();
+  renderer?.finish();
+  conv = events = renderer = null;
+  renderBackground([]);
+  setBusy(false);
+};
+const newConversation = () => {
+  closeConversation();
+  sessionId = null; total = 0; $("total").textContent = "$0.0000";
+  showEmpty();
+};
+const listen = () => {
+  events = new EventSource(`/api/events?conv=${conv}`);
+  events.onmessage = (m) => {
+    const ev = JSON.parse(m.data);
+    renderer.handle(ev);
+    // 会話が閉じたら、次の送信で保存された続きから開き直す
+    if (ev.kind === "closed") { events.close(); conv = events = renderer = null; renderBackground([]); setBusy(false); }
+  };
+};
+
 /* 送信 */
 const ta = $("prompt");
 const grow = () => { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px"; };
@@ -390,60 +465,40 @@ ta.addEventListener("input", grow);
 ta.onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); $("form").requestSubmit(); }
 };
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && controller) controller.abort(); });
+const interrupt = () => { if (conv && busy) post("/api/interrupt", { conv }).catch(() => {}); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") interrupt(); });
 
-const setBusy = (busy) => {
-  $("send").classList.toggle("stop", busy);
-  $("send").textContent = busy ? "■" : "↑";
-  $("send").title = busy ? "停止" : "送信";
-  $("reset").disabled = $("openHistory").disabled = $("cwd").disabled = $("model").disabled = $("effort").disabled = busy;
+const setBusy = (b) => {
+  busy = b;
+  $("send").classList.toggle("stop", b);
+  $("send").textContent = b ? "■" : "↑";
+  $("send").title = b ? "停止" : "送信";
 };
 
-$("reset").onclick = () => { sessionId = null; total = 0; $("total").textContent = "$0.0000"; showEmpty(); ta.focus(); };
+$("reset").onclick = () => { newConversation(); ta.focus(); };
+window.addEventListener("beforeunload", () => { if (conv) navigator.sendBeacon?.("/api/close", new Blob([JSON.stringify({ conv })], { type: "application/json" })); });
 
 $("form").onsubmit = async (e) => {
   e.preventDefault();
-  if (controller) return controller.abort();
+  if (busy) return interrupt();
   const prompt = ta.value.trim();
   if (!prompt) return;
   const cwd = $("cwd").value;
   if (!cwd || cwd === PICK) return $("cwd").focus();
   if (!hasKey) return $("settings").showModal();
 
-  if (!sessionId) $("log").replaceChildren();
+  if (!sessionId && !conv) $("log").replaceChildren();
   stick = true;
   addUser(prompt);
   ta.value = ""; grow();
-  controller = new AbortController();
-  setBusy(true);
-
-  const r = makeRenderer(true);
-  const handle = r.handle;
-
+  const fresh = !conv;
+  if (fresh) { conv = crypto.randomUUID(); renderer = makeRenderer(true); }
   try {
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, cwd, sessionId, model: $("model").value, effort: $("effort").value }),
-      signal: controller.signal,
-    });
-    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-    let buf = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += value;
-      const parts = buf.split("\n\n");
-      buf = parts.pop();
-      for (const p of parts) handle(JSON.parse(p.replace(/^data: /, "")));
-    }
+    await post("/api/send", { conv, prompt, cwd, sessionId, model: $("model").value, effort: $("effort").value });
+    if (fresh) listen();
   } catch (err) {
-    handle({ kind: "error", text: err.name === "AbortError" ? "停止しました" : String(err) });
-  } finally {
-    r.finish();
-    controller = null;
-    setBusy(false);
-    ta.focus();
+    append(el("div", "error", `送れませんでした: ${err.message}`));
+    if (fresh) conv = renderer = null;
   }
 };
 
