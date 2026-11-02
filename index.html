@@ -4,56 +4,187 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SDK Chat</title>
+<script src="/vendor/marked.js"></script>
+<script src="/vendor/purify.js"></script>
 <style>
-  :root { color-scheme: light dark; --bg: #fafafa; --fg: #222; --muted: #888; --card: #fff; --line: #ddd; --tool: #f3f0e6; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #161616; --fg: #e6e6e6; --muted: #888; --card: #1f1f1f; --line: #333; --tool: #2a2618; } }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.6 -apple-system, sans-serif; display: flex; flex-direction: column; height: 100vh; }
-  header { display: flex; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; align-items: center; }
-  header input, header select { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
-  #cwd { flex: 1; min-width: 240px; max-width: 480px; }
-  #log { flex: 1; overflow-y: auto; padding: 16px; }
-  .msg { max-width: 860px; margin: 0 auto 12px; white-space: pre-wrap; word-break: break-word; }
-  .user { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
-  .tool { background: var(--tool); border-radius: 6px; padding: 4px 10px; font: 12px ui-monospace, monospace; color: var(--muted); }
-  .meta { color: var(--muted); font-size: 12px; }
-  form { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
-  textarea { flex: 1; resize: vertical; min-height: 48px; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; }
-  button { border: 0; border-radius: 8px; padding: 0 16px; background: #d97757; color: #fff; font-weight: 600; cursor: pointer; }
-  button:disabled { opacity: .5; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f6f3; --panel: #ffffff; --fg: #1f1e1c; --muted: #85827b; --line: #e4e1da;
+    --accent: #c96442; --accent-fg: #fff; --user: #ece9e1; --code: #f1efe9;
+    --ok: #3f8f5a; --err: #c2453d; --run: #c9932f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1a1918; --panel: #232220; --fg: #e9e6df; --muted: #8e8a82; --line: #34322e;
+      --accent: #d97757; --user: #2d2b28; --code: #2a2825;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); font: 15px/1.7 -apple-system, "Hiragino Sans", sans-serif; }
+  button, select, input, textarea { font: inherit; color: inherit; }
+
+  /* 上部のバー */
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .brand { font-weight: 700; margin-right: 8px; white-space: nowrap; }
+  .pill { appearance: none; border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 4px 28px 4px 12px; font-size: 13px; cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+    background-position: calc(100% - 15px) 55%, calc(100% - 10px) 55%; background-size: 5px 5px; background-repeat: no-repeat; }
+  #cwd { max-width: 360px; min-width: 0; }
+  .spacer { flex: 1; }
+  .cost { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #openSettings { font-size: 16px; line-height: 1; padding: 4px 8px; }
+  .icon-btn { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 4px 10px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+  .icon-btn:hover, .pill:hover { border-color: var(--muted); }
+  .warn { color: var(--err); }
+
+  /* 会話 */
+  main { flex: 1; overflow-y: auto; }
+  #log { max-width: 820px; margin: 0 auto; padding: 24px 16px 8px; }
+  .empty { text-align: center; color: var(--muted); margin-top: 18vh; }
+  .empty h2 { color: var(--fg); font-size: 22px; margin: 0 0 8px; }
+  .user.long { max-height: 15em; overflow: hidden; cursor: pointer; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+  .user { margin: 20px 0 12px auto; width: fit-content; max-width: 85%; background: var(--user); border-radius: 14px; padding: 8px 14px; white-space: pre-wrap; word-break: break-word; }
+  .md { word-break: break-word; }
+  .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+  .md p, .md ul, .md ol { margin: 0 0 10px; }
+  .md code { font: 13px ui-monospace, Menlo, monospace; background: var(--code); border-radius: 4px; padding: 1px 5px; }
+  .md pre { background: var(--code); border-radius: 8px; padding: 12px; overflow-x: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md table { border-collapse: collapse; margin: 0 0 10px; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--line); padding: 4px 10px; }
+  .md a { color: var(--accent); }
+  .md blockquote { margin: 0 0 10px; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
+
+  /* ツール */
+  details.tool { margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 13px; }
+  details.tool summary { list-style: none; cursor: pointer; display: flex; gap: 8px; align-items: center; padding: 6px 10px; }
+  details.tool summary::-webkit-details-marker { display: none; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--run); flex: none; animation: pulse 1s infinite alternate; }
+  .tool.ok .dot { background: var(--ok); animation: none; } .tool.err .dot { background: var(--err); animation: none; }
+  @keyframes pulse { to { opacity: .3; } }
+  .tname { font-weight: 600; flex: none; }
+  .tsum { font-family: ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--line); max-height: 320px; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
+  .tool.err pre.out { color: var(--err); }
+  .meta { font-size: 12px; color: var(--muted); margin: 6px 0 16px; font-variant-numeric: tabular-nums; }
+  .error { color: var(--err); font-size: 13px; margin: 8px 0; }
+  .thinking { color: var(--muted); font-size: 13px; margin: 8px 0; }
+  .thinking::after { content: "…"; animation: pulse .8s infinite alternate; }
+
+  /* 入力 */
+  footer { padding: 8px 16px 16px; }
+  .composer { max-width: 820px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 8px 8px 8px 14px; }
+  .composer:focus-within { border-color: var(--muted); }
+  textarea { flex: 1; border: 0; outline: 0; background: none; resize: none; max-height: 40vh; padding: 6px 0; }
+  #send { flex: none; width: 36px; height: 36px; border: 0; border-radius: 10px; background: var(--accent); color: var(--accent-fg); cursor: pointer; font-size: 16px; }
+  #send:disabled { opacity: .4; cursor: default; }
+  #send.stop { background: var(--fg); color: var(--bg); }
+  .hint { max-width: 820px; margin: 6px auto 0; font-size: 12px; color: var(--muted); text-align: right; }
+
+  /* 設定 */
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--fg); padding: 20px; width: min(440px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgb(0 0 0 / .35); }
+  dialog h3 { margin: 0 0 12px; }
+  dialog label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  dialog input { width: 100%; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 6px 10px; }
+  .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .primary { border: 0; border-radius: 8px; padding: 6px 14px; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+
+  dialog.wide { width: min(640px, calc(100vw - 32px)); }
+  #historyList { max-height: 60vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+  .session { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; border: 1px solid transparent; background: none; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+  .session:hover { background: var(--bg); border-color: var(--line); }
+  .stitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .smeta { font-size: 12px; color: var(--muted); }
+
+  @media (max-width: 640px) { header { flex-wrap: wrap; } .brand { display: none; } #cwd { flex: 1 1 100%; max-width: none; } }
 </style>
 </head>
 <body>
 <header>
-  <select id="cwd" title="作業ディレクトリ"></select>
-  <select id="model" title="モデル"></select>
-  <input id="key" type="password" placeholder="API キー" size="16" autocomplete="off">
-  <button id="saveKey" type="button">キーを保存</button>
-  <span class="meta" id="keyState"></span>
-  <button id="reset" type="button">新しい会話</button>
-  <span class="meta" id="total">$0.0000</span>
+  <span class="brand">SDK Chat</span>
+  <select id="cwd" class="pill" title="作業ディレクトリ"></select>
+  <select id="model" class="pill" title="モデル"></select>
+  <select id="effort" class="pill" title="エフォート"></select>
+  <span class="spacer"></span>
+  <span class="cost" id="total" title="この会話の合計">$0.0000</span>
+  <button class="icon-btn" id="openHistory" type="button" title="過去の会話を再開">履歴</button>
+  <button class="icon-btn" id="reset" type="button" title="新しい会話">＋ 新規</button>
+  <button class="icon-btn" id="openSettings" type="button" title="設定">⚙</button>
 </header>
-<div id="log"></div>
-<form id="form">
-  <textarea id="prompt" placeholder="Enter で送信 / Shift+Enter で改行"></textarea>
-  <button id="send">送信</button>
-</form>
+
+<main id="scroller"><div id="log"></div></main>
+
+<footer>
+  <form class="composer" id="form">
+    <textarea id="prompt" rows="1" placeholder="メッセージを入力"></textarea>
+    <button id="send" title="送信">↑</button>
+  </form>
+  <div class="hint">Enter で送信 · Shift+Enter で改行 · Esc で停止</div>
+</footer>
+
+<dialog id="history" class="wide">
+  <h3>過去の会話 <span class="meta" id="historyDir"></span></h3>
+  <div id="historyList"></div>
+  <form method="dialog" class="row"><button class="icon-btn">閉じる</button></form>
+</dialog>
+
+<dialog id="settings">
+  <form method="dialog" id="settingsForm">
+    <h3>設定</h3>
+    <label for="key">API キー (<span id="keyState"></span>)</label>
+    <input id="key" type="password" placeholder="sk-ant-api03-…" autocomplete="off">
+    <div class="row">
+      <button class="icon-btn" value="cancel" formnovalidate>閉じる</button>
+      <button class="primary" id="saveKey" value="save">保存</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const store = (k, v) => { try { v === undefined ? (v = localStorage.getItem(k)) : localStorage.setItem(k, v); } catch {} return v; };
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const md = (text) => DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
+
+let sessionId = null, total = 0, controller = null, hasKey = false;
+
+/* 自動スクロールは、読み返している間は止める */
+const scroller = $("scroller");
+let stick = true;
+scroller.addEventListener("scroll", () => { stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80; });
+const follow = () => { if (stick) scroller.scrollTop = scroller.scrollHeight; };
+const append = (node) => { $("log").append(node); follow(); return node; };
+
+const shortPath = (p) => p.replace(/^\/Users\/[^/]+/, "~");
+const showEmpty = () => {
+  const box = el("div", "empty");
+  box.append(el("h2", null, "何をしましょうか"));
+  const dir = $("cwd").value;
+  box.append(el("div", null, dir && dir !== PICK ? shortPath(dir) : "まず作業ディレクトリを選んでください"));
+  if (!hasKey) box.append(el("div", "warn", "API キーが未設定です (⚙ から設定)"));
+  $("log").replaceChildren(box);
+};
+
+/* 作業ディレクトリ */
 const PICK = "__pick__";
 const loadRecent = () => { try { return JSON.parse(store("recentDirs") ?? "[]"); } catch { return []; } };
 const renderDirs = (selected) => {
   const recent = loadRecent();
   $("cwd").replaceChildren(
     ...(recent.length ? [] : [Object.assign(new Option("作業ディレクトリ未選択", ""), { disabled: true })]),
-    ...recent.map((p) => new Option(p.replace(/^\/Users\/[^/]+/, "~"), p)),
+    ...recent.map((p) => Object.assign(new Option("📁 " + p.split("/").pop(), p), { title: p })),
     new Option("フォルダを選択…", PICK),
   );
   $("cwd").value = selected ?? recent[0] ?? "";
+  $("cwd").title = $("cwd").value && $("cwd").value !== PICK ? $("cwd").value : "作業ディレクトリ";
 };
 const useDir = (path) => {
   store("recentDirs", JSON.stringify([path, ...loadRecent().filter((p) => p !== path)].slice(0, 10)));
   renderDirs(path);
+  // 会話はフォルダごとに保存されるので、フォルダを変えたら新しい会話にする
+  sessionId = null; total = 0; $("total").textContent = "$0.0000";
+  showEmpty();
 };
 renderDirs();
 let lastDir = $("cwd").value;
@@ -64,77 +195,241 @@ $("cwd").onchange = async () => {
   else renderDirs(lastDir || undefined);
 };
 
-fetch("/api/models").then((r) => r.json()).then((models) => {
-  $("model").replaceChildren(...models.map((m) => Object.assign(new Option(m.displayName, m.value), { title: m.description })));
+/* モデルとエフォート */
+let models = [];
+const EFFORT_LABEL = { low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
+const renderEffort = () => {
+  const levels = models.find((m) => m.value === $("model").value)?.efforts ?? [];
+  $("effort").hidden = !levels.length;
+  $("effort").replaceChildren(new Option("エフォート: 既定", ""), ...levels.map((l) => new Option("エフォート: " + EFFORT_LABEL[l], l)));
+  const saved = store("effort") ?? "";
+  $("effort").value = levels.includes(saved) ? saved : "";
+};
+fetch("/api/models").then((r) => r.json()).then((list) => {
+  models = list;
+  $("model").replaceChildren(...list.map((m) => Object.assign(new Option(m.displayName, m.value), { title: m.description })));
   $("model").value = store("model") ?? "default";
   if (!$("model").value) $("model").value = "default";
+  renderEffort();
 });
-$("model").onchange = () => store("model", $("model").value);
-let sessionId = null, total = 0;
+$("model").onchange = () => { store("model", $("model").value); renderEffort(); };
+$("effort").onchange = () => store("effort", $("effort").value);
 
-const add = (cls, text) => {
-  const el = document.createElement("div");
-  el.className = "msg " + cls;
-  el.textContent = text;
-  $("log").append(el);
-  $("log").scrollTop = $("log").scrollHeight;
-};
-
-const showKey = ({ masked }) => { $("keyState").textContent = masked ? `キー: ${masked}` : "キー未設定"; };
-fetch("/api/key").then((r) => r.json()).then(showKey);
-$("saveKey").onclick = async () => {
+/* API キー */
+const showKey = ({ masked }) => { hasKey = !!masked; $("keyState").textContent = masked ? `保存済み: ${masked}` : "未設定"; $("openSettings").classList.toggle("warn", !masked); };
+fetch("/api/key").then((r) => r.json()).then((k) => { showKey(k); if (!sessionId) showEmpty(); });
+$("openSettings").onclick = () => $("settings").showModal();
+$("settings").onclose = async () => {
+  if ($("settings").returnValue !== "save" || !$("key").value.trim()) return ($("key").value = "");
   const res = await fetch("/api/key", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: $("key").value }) });
   $("key").value = "";
   showKey(await res.json());
+  if (!sessionId) showEmpty();
 };
 
-$("reset").onclick =() => { sessionId = null; $("log").innerHTML = ""; };
-// 日本語の変換確定の Enter では送らない
-$("prompt").onkeydown = (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
-    e.preventDefault();
-    $("form").requestSubmit();
+/* ツールの 1 行要約 */
+const summarize = (name, input) => {
+  const rel = (p) => { const d = $("cwd").value; return p?.startsWith(d + "/") ? p.slice(d.length + 1) : shortPath(p ?? ""); };
+  switch (name) {
+    case "Bash": return input.command;
+    case "Read": case "Write": case "Edit": case "NotebookEdit": return rel(input.file_path ?? input.notebook_path);
+    case "Grep": return `${input.pattern}${input.path ? "  in " + rel(input.path) : ""}`;
+    case "Glob": return input.pattern;
+    case "WebFetch": return input.url;
+    case "WebSearch": return input.query;
+    case "Task": case "Agent": return input.description;
+    case "TodoWrite": return `${input.todos?.length ?? 0} 件`;
+    default: return Object.values(input).find((v) => typeof v === "string") ?? "";
   }
 };
 
-$("form").onsubmit = async (e) => {
-  e.preventDefault();
-  const prompt = $("prompt").value.trim();
-  if (!prompt || $("send").disabled) return;
-  if (!$("cwd").value || $("cwd").value === PICK) return add("meta", "作業ディレクトリを選んでください");
-  add("user", prompt);
-  $("prompt").value = "";
-  $("send").disabled = true;
+// 貼り付けた長文で画面が埋まらないよう、長い発言は畳んでクリックで開く
+const addUser = (text) => {
+  const node = el("div", "user long", text);
+  append(node);
+  if (node.scrollHeight <= node.clientHeight) node.classList.remove("long");
+  else {
+    node.title = "クリックで全文を表示";
+    node.onclick = () => { node.classList.remove("long"); node.title = ""; node.onclick = null; };
+  }
+};
 
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, cwd: $("cwd").value, sessionId, model: $("model").value }),
-  });
-  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += value;
-    const parts = buf.split("\n\n");
-    buf = parts.pop();
-    for (const p of parts) {
-      const ev = JSON.parse(p.replace(/^data: /, ""));
-      if (ev.kind === "session") sessionId = ev.sessionId;
-      else if (ev.kind === "text") add("", ev.text);
-      else if (ev.kind === "tool") add("tool", `▶ ${ev.name} ${JSON.stringify(ev.input).slice(0, 300)}`);
-      else if (ev.kind === "error") add("meta", "エラー: " + ev.text);
-      else if (ev.kind === "result") {
+/* ストリームと履歴の再生で共通の描画 */
+const makeRenderer = (live) => {
+  const tools = new Map();
+  let textNode = null, textBuf = "", pending = false;
+  const waiting = live ? append(el("div", "thinking", "考えています")) : null;
+  const settle = () => waiting?.remove();
+  const renderText = () => { pending = false; if (textNode) { textNode.innerHTML = md(textBuf); follow(); } };
+  const handle = (ev) => {
+    switch (ev.kind) {
+      case "session": sessionId = ev.sessionId; break;
+      case "user": textNode = null; addUser(ev.text); break;
+      case "text": settle(); textNode = null; append(el("div", "md")).innerHTML = md(ev.text); break;
+      case "text_start": settle(); textBuf = ""; textNode = append(el("div", "md")); break;
+      case "text_delta":
+        textBuf += ev.text;
+        if (!pending) { pending = true; requestAnimationFrame(renderText); }
+        break;
+      case "tool": {
+        settle(); textNode = null;
+        const d = el("details", "tool");
+        const s = el("summary");
+        s.append(el("span", "dot"), el("span", "tname", ev.name), el("span", "tsum", summarize(ev.name, ev.input)));
+        d.append(s, el("pre", "in", JSON.stringify(ev.input, null, 2)));
+        tools.set(ev.id, append(d));
+        break;
+      }
+      case "tool_result": {
+        const d = tools.get(ev.id);
+        if (!d) break;
+        d.classList.add(ev.isError ? "err" : "ok");
+        d.append(el("pre", "out", ev.text || "(出力なし)"));
+        break;
+      }
+      case "error": settle(); append(el("div", "error", ev.text)); break;
+      case "result": {
+        settle();
         sessionId = ev.sessionId;
         total += ev.cost ?? 0;
         $("total").textContent = "$" + total.toFixed(4);
-        add("meta", `このターン $${(ev.cost ?? 0).toFixed(4)}${ev.isError ? " (エラー終了)" : ""}`);
+        const k = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : n);
+        const parts = [`$${(ev.cost ?? 0).toFixed(4)}`, `${(ev.durationMs / 1000).toFixed(1)} 秒`, `入力 ${k(ev.inputTokens)} / 出力 ${k(ev.outputTokens)} トークン`];
+        if (ev.isError) append(el("div", "error", (ev.errors ?? []).join("\n") || "エラーで終了しました"));
+        append(el("div", "meta", parts.join(" · ")));
+        break;
       }
     }
-  }
-  $("send").disabled = false;
+  };
+  const finish = () => {
+    settle();
+    renderText();
+    // 結果が届かなかったツールは、中断されたものとして止める
+    for (const d of tools.values()) if (!d.classList.contains("ok") && !d.classList.contains("err")) d.classList.add(live ? "err" : "ok");
+  };
+  return { handle, finish };
 };
+
+// 失敗を握りつぶして「読み込み中」のまま止まらないよう、HTTP の失敗も例外にする
+const getJson = async (url) => {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`.trim());
+  return res.json();
+};
+
+/* 過去の会話 */
+const ago = (t) => {
+  const m = Math.round((Date.now() - t) / 60000);
+  return m < 60 ? `${m} 分前` : m < 1440 ? `${Math.round(m / 60)} 時間前` : `${Math.round(m / 1440)} 日前`;
+};
+$("openHistory").onclick = async () => {
+  const dir = $("cwd").value;
+  if (!dir || dir === PICK) return $("cwd").focus();
+  $("historyDir").textContent = shortPath(dir);
+  $("historyList").replaceChildren(el("div", "meta", "読み込み中…"));
+  $("history").showModal();
+  let list;
+  try {
+    list = await getJson(`/api/sessions?dir=${encodeURIComponent(dir)}`);
+  } catch (err) {
+    return $("historyList").replaceChildren(el("div", "error", `読み込めませんでした: ${err.message}`));
+  }
+  $("historyList").replaceChildren(
+    ...(list.length ? list.map((s) => {
+      const b = el("button", "session");
+      b.type = "button";
+      b.append(el("span", "stitle", s.title), el("span", "smeta", [ago(s.lastModified), s.gitBranch].filter(Boolean).join(" · ")));
+      b.onclick = () => { $("history").close(); resume(s.sessionId); };
+      return b;
+    }) : [el("div", "meta", "このフォルダの会話はまだありません")]),
+  );
+};
+const resume = async (id) => {
+  const dir = $("cwd").value;
+  sessionId = id; total = 0; $("total").textContent = "$0.0000";
+  $("log").replaceChildren(el("div", "meta", "読み込み中…"));
+  let events;
+  try {
+    events = await getJson(`/api/sessions?dir=${encodeURIComponent(dir)}&id=${id}`);
+  } catch (err) {
+    sessionId = null;
+    return $("log").replaceChildren(el("div", "error", `読み込めませんでした: ${err.message}`));
+  }
+  $("log").replaceChildren();
+  const r = makeRenderer(false);
+  events.forEach(r.handle);
+  r.finish();
+  append(el("div", "meta", "ここから続きを話せます"));
+  stick = true; follow(); ta.focus();
+};
+
+/* 送信 */
+const ta = $("prompt");
+const grow = () => { ta.style.height = "auto"; ta.style.height = ta.scrollHeight + "px"; };
+ta.addEventListener("input", grow);
+// 日本語の変換確定の Enter では送らない
+ta.onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); $("form").requestSubmit(); }
+};
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && controller) controller.abort(); });
+
+const setBusy = (busy) => {
+  $("send").classList.toggle("stop", busy);
+  $("send").textContent = busy ? "■" : "↑";
+  $("send").title = busy ? "停止" : "送信";
+  $("reset").disabled = $("openHistory").disabled = $("cwd").disabled = $("model").disabled = $("effort").disabled = busy;
+};
+
+$("reset").onclick = () => { sessionId = null; total = 0; $("total").textContent = "$0.0000"; showEmpty(); ta.focus(); };
+
+$("form").onsubmit = async (e) => {
+  e.preventDefault();
+  if (controller) return controller.abort();
+  const prompt = ta.value.trim();
+  if (!prompt) return;
+  const cwd = $("cwd").value;
+  if (!cwd || cwd === PICK) return $("cwd").focus();
+  if (!hasKey) return $("settings").showModal();
+
+  if (!sessionId) $("log").replaceChildren();
+  stick = true;
+  addUser(prompt);
+  ta.value = ""; grow();
+  controller = new AbortController();
+  setBusy(true);
+
+  const r = makeRenderer(true);
+  const handle = r.handle;
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, cwd, sessionId, model: $("model").value, effort: $("effort").value }),
+      signal: controller.signal,
+    });
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      const parts = buf.split("\n\n");
+      buf = parts.pop();
+      for (const p of parts) handle(JSON.parse(p.replace(/^data: /, "")));
+    }
+  } catch (err) {
+    handle({ kind: "error", text: err.name === "AbortError" ? "停止しました" : String(err) });
+  } finally {
+    r.finish();
+    controller = null;
+    setBusy(false);
+    ta.focus();
+  }
+};
+
+showEmpty();
+ta.focus();
 </script>
 </body>
 </html>
