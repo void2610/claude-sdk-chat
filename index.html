@@ -10,7 +10,7 @@
   body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.6 -apple-system, sans-serif; display: flex; flex-direction: column; height: 100vh; }
   header { display: flex; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; align-items: center; }
   header input, header select { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
-  #cwd { flex: 1; min-width: 240px; }
+  #cwd { flex: 1; min-width: 240px; max-width: 480px; }
   #log { flex: 1; overflow-y: auto; padding: 16px; }
   .msg { max-width: 860px; margin: 0 auto 12px; white-space: pre-wrap; word-break: break-word; }
   .user { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
@@ -24,8 +24,8 @@
 </head>
 <body>
 <header>
-  <input id="cwd" placeholder="作業ディレクトリ (絶対パス)">
-  <input id="model" placeholder="model (空なら既定)" size="16">
+  <select id="cwd" title="作業ディレクトリ"></select>
+  <select id="model" title="モデル"></select>
   <input id="key" type="password" placeholder="API キー" size="16" autocomplete="off">
   <button id="saveKey" type="button">キーを保存</button>
   <span class="meta" id="keyState"></span>
@@ -40,8 +40,36 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const store = (k, v) => { try { v === undefined ? (v = localStorage.getItem(k)) : localStorage.setItem(k, v); } catch {} return v; };
-$("cwd").value = store("cwd") ?? "";
-$("model").value = store("model") ?? "";
+const PICK = "__pick__";
+const loadRecent = () => { try { return JSON.parse(store("recentDirs") ?? "[]"); } catch { return []; } };
+const renderDirs = (selected) => {
+  const recent = loadRecent();
+  $("cwd").replaceChildren(
+    ...(recent.length ? [] : [Object.assign(new Option("作業ディレクトリ未選択", ""), { disabled: true })]),
+    ...recent.map((p) => new Option(p.replace(/^\/Users\/[^/]+/, "~"), p)),
+    new Option("フォルダを選択…", PICK),
+  );
+  $("cwd").value = selected ?? recent[0] ?? "";
+};
+const useDir = (path) => {
+  store("recentDirs", JSON.stringify([path, ...loadRecent().filter((p) => p !== path)].slice(0, 10)));
+  renderDirs(path);
+};
+renderDirs();
+let lastDir = $("cwd").value;
+$("cwd").onchange = async () => {
+  if ($("cwd").value !== PICK) return useDir((lastDir = $("cwd").value));
+  const { path } = await (await fetch("/api/pick-dir", { method: "POST" })).json();
+  if (path) useDir((lastDir = path));
+  else renderDirs(lastDir || undefined);
+};
+
+fetch("/api/models").then((r) => r.json()).then((models) => {
+  $("model").replaceChildren(...models.map((m) => Object.assign(new Option(m.displayName, m.value), { title: m.description })));
+  $("model").value = store("model") ?? "default";
+  if (!$("model").value) $("model").value = "default";
+});
+$("model").onchange = () => store("model", $("model").value);
 let sessionId = null, total = 0;
 
 const add = (cls, text) => {
@@ -67,7 +95,7 @@ $("form").onsubmit = async (e) => {
   e.preventDefault();
   const prompt = $("prompt").value.trim();
   if (!prompt) return;
-  ["cwd", "model"].forEach((k) => store(k, $(k).value));
+  if (!$("cwd").value || $("cwd").value === PICK) return add("meta", "作業ディレクトリを選んでください");
   add("user", prompt);
   $("prompt").value = "";
   $("send").disabled = true;

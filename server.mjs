@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
@@ -21,7 +22,28 @@ const saveApiKey = async (apiKey) => {
   await writeFile(CONFIG_PATH, JSON.stringify({ apiKey }), { mode: 0o600 });
 };
 
-const maskKey = (key) => (key ? `${key.slice(0, 10)}…${key.slice(-4)}` : null);
+let modelsCache;
+const listModels = async () => {
+  if (modelsCache) return modelsCache;
+  // 一覧は SDK 内で決まり通信しないので、入力を待つだけのセッションを開いて聞く
+  const q = query({ prompt: (async function* () { await new Promise(() => {}); })() });
+  try {
+    modelsCache = (await q.supportedModels()).map(({ value, displayName, description }) => ({ value, displayName, description }));
+  } finally {
+    q.close();
+  }
+  return modelsCache;
+};
+
+const pickDirectory = () =>
+  new Promise((resolve) => {
+    execFile("osascript", ["-e", 'POSIX path of (choose folder with prompt "作業ディレクトリを選択")'], (err, stdout) =>
+      // キャンセルされたら null を返す
+      resolve(err ? null : stdout.trim().replace(/\/$/, "")),
+    );
+  });
+
+const maskKey =(key) => (key ? `${key.slice(0, 10)}…${key.slice(-4)}` : null);
 
 const readBody = async (req) => {
   let data = "";
@@ -89,6 +111,11 @@ const isSameOrigin = (req) => {
 createServer(async (req, res) => {
   if (!isSameOrigin(req)) return res.writeHead(403).end();
   if (req.method === "POST" && req.url === "/api/chat") return handleChat(req, res);
+  if (req.url === "/api/models" || (req.method === "POST" && req.url === "/api/pick-dir")) {
+    const body = req.url === "/api/models" ? await listModels() : { path: await pickDirectory() };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify(body));
+  }
   if (req.url === "/api/key") {
     if (req.method === "POST") await saveApiKey((await readBody(req)).apiKey?.trim() ?? "");
     res.writeHead(200, { "Content-Type": "application/json" });
