@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { join } from "node:path";
@@ -84,6 +84,21 @@ const IDLE_CLOSE_MS = 30 * 60 * 1000;
 
 const conversations = new Map();
 
+const OUTPUT_TAIL_BYTES = 20000;
+const readTail = async (path) => {
+  const fh = await open(path, "r");
+  try {
+    const { size } = await fh.stat();
+    const start = Math.max(0, size - OUTPUT_TAIL_BYTES);
+    const { buffer, bytesRead } = await fh.read(Buffer.alloc(size - start), 0, size - start, start);
+    // 途中から読んだときは、切れた先頭の行を捨てる
+    const text = buffer.subarray(0, bytesRead).toString("utf8");
+    return { size, text: start > 0 ? text.slice(text.indexOf("\n") + 1) : text };
+  } finally {
+    await fh.close();
+  }
+};
+
 // 1 つの会話につき query() を開いたままにし、ターンの合間もバックグラウンドの作業と通知を受け取る
 class Conversation {
   constructor(id, { cwd, sessionId, model, effort, apiKey }) {
@@ -97,6 +112,10 @@ class Conversation {
     this.subscribers = new Set();
     this.busy = false;
     this.closed = false;
+    this.taskOfTool = new Map();
+    this.taskTypes = new Map();
+    this.watchers = new Map();
+    this.latestOutput = new Map();
     this.q = query({
       prompt: this.input(),
       options: {
@@ -147,6 +166,7 @@ class Conversation {
 
   subscribe(send) {
     for (const ev of this.log) send(ev);
+    for (const ev of this.latestOutput.values()) send(ev);
     this.subscribers.add(send);
     clearTimeout(this.idleTimer);
     return () => {
@@ -160,9 +180,42 @@ class Conversation {
     if (!this.subscribers.size) this.idleTimer = setTimeout(() => this.close(), IDLE_CLOSE_MS);
   }
 
+  // 出力は毎秒の全文なので、履歴には残さず最新だけを持つ
+  emitOutput(ev) {
+    this.latestOutput.set(ev.id, ev);
+    for (const send of this.subscribers) send(ev);
+  }
+
+  // SDK に実行中の出力を読む口が無いので、作業が書き出すファイルを追う
+  watchOutput(taskId, path) {
+    if (this.watchers.has(taskId) || this.closed) return;
+    let lastSize = -1;
+    const poll = async () => {
+      try {
+        const { size, text } = await readTail(path);
+        if (size === lastSize) return;
+        lastSize = size;
+        this.emitOutput({ kind: "task_output", id: taskId, text });
+      } catch {}
+    };
+    this.watchers.set(taskId, { timer: setInterval(poll, 1000), poll });
+    poll();
+  }
+
+  async unwatchOutput(taskId, path) {
+    const w = this.watchers.get(taskId);
+    if (path && !w) this.watchOutput(taskId, path);
+    const watcher = this.watchers.get(taskId);
+    if (!watcher) return;
+    clearInterval(watcher.timer);
+    this.watchers.delete(taskId);
+    await watcher.poll();
+  }
+
   close() {
     if (this.closed) return;
     this.closed = true;
+    for (const w of this.watchers.values()) clearInterval(w.timer);
     clearTimeout(this.idleTimer);
     this.q.close();
     this.wake?.();
@@ -197,7 +250,13 @@ class Conversation {
       }
     } else if (msg.type === "user" && !msg.isReplay && Array.isArray(msg.message.content)) {
       for (const block of msg.message.content) {
-        if (block.type === "tool_result") this.emit({ kind: "tool_result", id: block.tool_use_id, text: toolResultText(block.content), isError: !!block.is_error });
+        if (block.type !== "tool_result") continue;
+        const text = toolResultText(block.content);
+        this.emit({ kind: "tool_result", id: block.tool_use_id, text, isError: !!block.is_error });
+        const path = text.match(/Output is being written to: (\S+?)\.?(?=\s|$)/)?.[1];
+        const taskId = this.taskOfTool.get(block.tool_use_id);
+        if (path && taskId) this.watchOutput(taskId, path);
+        else if (path) this.taskOfTool.set(block.tool_use_id, { path });
       }
     } else if (msg.type === "result") {
       this.sessionId = msg.session_id;
@@ -211,15 +270,24 @@ class Conversation {
       case "init":
         this.sessionId = msg.session_id;
         return this.emit({ kind: "session", sessionId: msg.session_id, model: msg.model });
-      case "task_started":
+      case "task_started": {
         if (msg.ambient) return;
+        // ツールの結果 (出力先が書かれている) が先に届いていれば、ここで追い始める
+        const early = this.taskOfTool.get(msg.tool_use_id);
+        if (early?.path) this.watchOutput(msg.task_id, early.path);
+        if (msg.tool_use_id) this.taskOfTool.set(msg.tool_use_id, msg.task_id);
+        this.taskTypes.set(msg.task_id, msg.task_type ?? "");
         return this.emit({ kind: "task", id: msg.task_id, toolUseId: msg.tool_use_id, description: msg.description, taskType: msg.task_type, subagentType: msg.subagent_type });
+      }
       case "task_updated":
+        if (["completed", "failed", "killed"].includes(msg.patch.status)) this.unwatchOutput(msg.task_id);
         return this.emit({ kind: "task_update", id: msg.task_id, status: msg.patch.status, description: msg.patch.description, error: msg.patch.error });
       case "task_progress":
         return this.emit({ kind: "task_update", id: msg.task_id, summary: msg.summary, lastTool: msg.last_tool_name, usage: msg.usage });
       case "task_notification":
         if (msg.ambient) return;
+        // エージェントの output_file は会話の記録なので、出力としては出さない
+        this.unwatchOutput(msg.task_id, /agent|workflow/.test(this.taskTypes.get(msg.task_id) ?? "agent") ? undefined : msg.output_file);
         return this.emit({ kind: "task_update", id: msg.task_id, status: msg.status, summary: msg.summary, usage: msg.usage });
       case "background_tasks_changed":
         return this.emit({ kind: "background", tasks: msg.tasks.filter((t) => !t.ambient).map((t) => ({ id: t.task_id, type: t.task_type, description: t.description })) });

@@ -80,6 +80,8 @@
   .tsum { font-family: ui-monospace, Menlo, monospace; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   details.tool pre { margin: 0; padding: 8px 10px; border-top: 1px solid var(--line); max-height: 320px; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
   .tool.err pre.out { color: var(--err); }
+  .tinfo { padding: 4px 10px 6px; color: var(--muted); font-size: 12px; white-space: pre-wrap; }
+  .tinfo:empty { display: none; }
   .meta { font-size: 12px; color: var(--muted); margin: 6px 0 16px; font-variant-numeric: tabular-nums; }
   .error { color: var(--err); font-size: 13px; margin: 8px 0; }
   .thinking { color: var(--muted); font-size: 13px; margin: 8px 0; }
@@ -404,7 +406,9 @@ const makeRenderer = (tab, live) => {
         stop.type = "button";
         stop.onclick = (e) => { e.preventDefault(); post("/api/stop-task", { conv: tab.conv, taskId: ev.id }); };
         s.append(el("span", "dot"), el("span", "tname", "⧗ " + (TASK_LABEL[ev.taskType] ?? ev.subagentType ?? ev.taskType ?? "タスク")), el("span", "tsum", ev.description), stop);
-        d.append(s, el("pre", "out", "実行中…"));
+        // 実行中は中身が見えるよう開いておく
+        d.open = live;
+        d.append(s, el("pre", "out", "出力を待っています…"), el("div", "tinfo"));
         tasks.set(ev.id, add(d));
         break;
       }
@@ -413,11 +417,21 @@ const makeRenderer = (tab, live) => {
         if (!d) break;
         if (ev.description) d.querySelector(".tsum").textContent = ev.description;
         const lines = [ev.summary, ev.lastTool && `直近のツール: ${ev.lastTool}`, ev.usage && `${(ev.usage.duration_ms / 1000).toFixed(0)} 秒 · ツール ${ev.usage.tool_uses} 回 · ${k(ev.usage.total_tokens)} トークン`, ev.error].filter(Boolean);
-        if (lines.length) d.querySelector("pre.out").textContent = lines.join("\n");
+        if (lines.length) d.querySelector(".tinfo").textContent = lines.join("\n");
         if (["completed", "failed", "killed", "stopped"].includes(ev.status)) {
           d.classList.add(ev.status === "completed" ? "ok" : "err");
           d.querySelector(".task-stop")?.remove();
         }
+        break;
+      }
+      case "task_output": {
+        const pre = tasks.get(ev.id)?.querySelector("pre.out");
+        if (!pre) break;
+        // 出力を読み返している間は、末尾へ引き戻さない
+        const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 20;
+        pre.textContent = ev.text || "(出力なし)";
+        if (atEnd) pre.scrollTop = pre.scrollHeight;
+        follow(tab);
         break;
       }
       case "background": tab.bg = ev.tasks; renderBackground(tab); renderTabs(); break;
