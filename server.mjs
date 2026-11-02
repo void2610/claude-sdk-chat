@@ -326,4 +326,11 @@ createServer(async (req, res) => {
     if (!res.headersSent) res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(String(e?.message ?? e));
   }
-}).listen(PORT, "127.0.0.1", () => console.log(`http://127.0.0.1:${PORT}`));
+})
+  .on("error", (e) => {
+    if (e.code !== "EADDRINUSE") throw e;
+    // 会話はタブで並列に動かせるので、2 つ目のサーバーは立てずに既存の方へ案内する
+    console.error(`http://127.0.0.1:${PORT} ですでに起動しています。そのページのタブで会話を増やしてください (別のポートで立てるなら PORT=8788 npm start)`);
+    process.exit(1);
+  })
+  .listen(PORT, "127.0.0.1", () => console.log(`http://127.0.0.1:${PORT}`));
