@@ -17,7 +17,7 @@ const readBody = async (req) => {
 };
 
 const handleChat = async (req, res) => {
-  const { prompt, cwd, sessionId, model, permissionMode } = await readBody(req);
+  const { prompt, cwd, sessionId, model } = await readBody(req);
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
   const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
@@ -31,7 +31,9 @@ const handleChat = async (req, res) => {
         cwd,
         resume: sessionId || undefined,
         model: model || undefined,
-        permissionMode,
+        // 確認を出す画面が無いので、すべてのツールを確認なしで通す
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
         abortController: abort,
         // CLAUDE.md・スキル・設定を Claude Code と同じように読む
         settingSources: ["user", "project", "local"],

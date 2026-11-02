@@ -25,11 +25,6 @@
 <body>
 <header>
   <input id="cwd" placeholder="作業ディレクトリ (絶対パス)">
-  <select id="mode">
-    <option value="acceptEdits">acceptEdits</option>
-    <option value="bypassPermissions">bypassPermissions</option>
-    <option value="plan">plan</option>
-  </select>
   <input id="model" placeholder="model (空なら既定)" size="16">
   <button id="reset" type="button">新しい会話</button>
   <span class="meta" id="total">$0.0000</span>
@@ -43,7 +38,6 @@
 const $ = (id) => document.getElementById(id);
 const store = (k, v) => { try { v === undefined ? (v = localStorage.getItem(k)) : localStorage.setItem(k, v); } catch {} return v; };
 $("cwd").value = store("cwd") ?? "";
-$("mode").value = store("mode") ?? "acceptEdits";
 $("model").value = store("model") ?? "";
 let sessionId = null, total = 0;
 
@@ -62,7 +56,7 @@ $("form").onsubmit = async (e) => {
   e.preventDefault();
   const prompt = $("prompt").value.trim();
   if (!prompt) return;
-  ["cwd", "mode", "model"].forEach((k) => store(k, $(k).value));
+  ["cwd", "model"].forEach((k) => store(k, $(k).value));
   add("user", prompt);
   $("prompt").value = "";
   $("send").disabled = true;
@@ -70,7 +64,7 @@ $("form").onsubmit = async (e) => {
   const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, cwd: $("cwd").value, sessionId, model: $("model").value, permissionMode: $("mode").value }),
+    body: JSON.stringify({ prompt, cwd: $("cwd").value, sessionId, model: $("model").value }),
   });
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "";
