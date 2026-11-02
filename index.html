@@ -128,7 +128,7 @@
     <textarea id="prompt" rows="1" placeholder="メッセージを入力"></textarea>
     <button id="send" title="送信">↑</button>
   </form>
-  <div class="hint">Enter で送信 · Shift+Enter で改行 · Esc で停止</div>
+  <div class="hint">Enter で送信 · Shift+Enter で改行 · ↑↓ で過去のプロンプト · Esc で停止</div>
 </footer>
 
 <dialog id="history" class="wide">
@@ -465,6 +465,34 @@ ta.addEventListener("input", grow);
 ta.onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); $("form").requestSubmit(); }
 };
+/* 過去のプロンプト (↑↓) */
+const loadPrompts = () => { try { return JSON.parse(store("prompts") ?? "[]"); } catch { return []; } };
+let promptIndex = -1, draft = "";
+const rememberPrompt = (text) => {
+  store("prompts", JSON.stringify([text, ...loadPrompts().filter((p) => p !== text)].slice(0, 200)));
+  promptIndex = -1;
+};
+const recallPrompt = (dir) => {
+  const prompts = loadPrompts();
+  const next = promptIndex + dir;
+  if (next < -1 || next >= prompts.length) return false;
+  if (promptIndex === -1) draft = ta.value;
+  promptIndex = next;
+  ta.value = next === -1 ? draft : prompts[next];
+  grow();
+  const end = dir > 0 ? 0 : ta.value.length;
+  ta.setSelectionRange(end, end);
+  return true;
+};
+ta.addEventListener("keydown", (e) => {
+  if (e.isComposing || e.keyCode === 229 || e.shiftKey || e.altKey || e.metaKey || e.ctrlKey) return;
+  // 複数行の途中ではカーソル移動を優先し、先頭行の ↑ / 最終行の ↓ でだけ履歴をたどる
+  const before = ta.value.slice(0, ta.selectionStart), after = ta.value.slice(ta.selectionEnd);
+  if (e.key === "ArrowUp" && !before.includes("\n") && recallPrompt(1)) e.preventDefault();
+  else if (e.key === "ArrowDown" && !after.includes("\n") && recallPrompt(-1)) e.preventDefault();
+});
+ta.addEventListener("input", () => { promptIndex = -1; });
+
 const interrupt = () => { if (conv && busy) post("/api/interrupt", { conv }).catch(() => {}); };
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") interrupt(); });
 
@@ -490,6 +518,7 @@ $("form").onsubmit = async (e) => {
   if (!sessionId && !conv) $("log").replaceChildren();
   stick = true;
   addUser(prompt);
+  rememberPrompt(prompt);
   ta.value = ""; grow();
   const fresh = !conv;
   if (fresh) { conv = crypto.randomUUID(); renderer = makeRenderer(true); }
